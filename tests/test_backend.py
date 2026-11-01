@@ -46,7 +46,7 @@ def test_chat_memory_retry_and_history(setup):
     assert a.status_code==200
     assert c.post('/api/chat',headers=H,json=body).json()==a.json()
     assert len([r for r in calls if 'generateContent' in str(r.url)])==1
-    payload=json.loads(calls[0].content)
+    payload=json.loads(next(r for r in calls if 'generateContent' in str(r.url)).content)
     assert 'I make anime edits.' in payload['systemInstruction']['parts'][0]['text']
     rows=c.get('/api/messages',headers=H).json()['messages']
     assert [r['role'] for r in rows]==['user','assistant']
@@ -60,7 +60,7 @@ def test_settings_encrypt_and_validation(setup):
     data={'model':'test-model','gemini_api_key':'private-new-key','telegram_enabled':False,'telegram_user_id':''}
     assert c.put('/api/settings',headers=H,json=data).status_code==200
     assert 'private-new-key' not in db.get('gemini_api_key')
-    assert c.get('/api/models',headers=H).json()['models']==['test-model']
+    assert c.get('/api/models',headers=H).json()['models']==['gemini:test-model']
     assert c.put('/api/settings',headers=H,json={**data,'telegram_enabled':True}).status_code==422
     assert c.put('/api/settings',headers=H,json={**data,'model':'../escape'}).status_code==422
     assert c.put('/api/settings',headers=H,json={**data,'gemini_api_key':''}).status_code==200
@@ -113,6 +113,7 @@ def test_telegram_owner_filter(tmp_path,monkeypatch):
                 {'update_id':2,'message':{'text':'group','from':{'id':123},'chat':{'id':-1,'type':'group'}}},
                 {'update_id':3,'message':{'text':'hey','from':{'id':123},'chat':{'id':123,'type':'private'}}}
             ]})
+        if request.url.path.endswith('/models'):return httpx.Response(200,json={'models':[{'name':'models/test-model','supportedGenerationMethods':['generateContent']}]})
         if 'sendMessage' in url:sent.append(json.loads(request.content));return httpx.Response(200,json={'ok':True,'result':{}})
         return httpx.Response(200,json={'candidates':[{'content':{'parts':[{'text':'Hey, MONTAi.'}]}}]})
     client=httpx.AsyncClient(transport=httpx.MockTransport(handler))

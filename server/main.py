@@ -15,6 +15,7 @@ import httpx
 from cryptography.fernet import Fernet
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
+from .ai import Router
 
 log = logging.getLogger('kana')
 # Never enable HTTP client DEBUG logging: Telegram embeds its token in URLs.
@@ -66,11 +67,17 @@ class ChatInput(BaseModel):
 class MemoryInput(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 class SettingsInput(BaseModel):
-    model: str = Field(min_length=1, max_length=100)
+    model: str = Field(default='auto', min_length=1, max_length=100)
     telegram_user_id: str = Field(default='', max_length=30)
     telegram_enabled: bool = False
     gemini_api_key: str | None = Field(default=None, max_length=256)
     telegram_bot_token: str | None = Field(default=None, max_length=256)
+
+
+class ProviderInput(BaseModel):
+    api_key: str = Field(min_length=1, max_length=512)
+    provider: str = Field(default='auto', max_length=30)
+    base_url: str = Field(default='', max_length=500)
 
 
 def create_app(db_override=None, client_override=None):
@@ -89,8 +96,11 @@ def create_app(db_override=None, client_override=None):
         raw = db.get(name, None)
         if raw is None: return os.environ.get(name.upper(), '')
         return cipher.decrypt(raw.encode()).decode() if raw else ''
+    def storesecret(name, value):
+        db.put(name,cipher.encrypt(value.encode()).decode() if value else '')
+    router = Router(db,getsecret,storesecret,lambda: app.state.client)
     def config():
-        return {'model': db.get('model', os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')), 'telegram_user_id': db.get('telegram_user_id', os.environ.get('TELEGRAM_USER_ID', '')), 'telegram_enabled': db.get('telegram_enabled', 'false') == 'true', 'has_gemini_key': bool(getsecret('gemini_api_key')), 'has_telegram_token': bool(getsecret('telegram_bot_token'))}
+        return {'model':'auto', 'telegram_user_id':db.get('telegram_user_id', os.environ.get('TELEGRAM_USER_ID','')), 'telegram_enabled':db.get('telegram_enabled','false')=='true', 'has_gemini_key':bool(router.keys().get('gemini')), 'has_telegram_token':bool(getsecret('telegram_bot_token')), **router.status()}
     async def tg(method, token, payload):
         r = await app.state.client.post('https://api.telegram.org/bot' + token + '/' + method, json=payload)
         if r.status_code != 200 or not r.json().get('ok'): raise HTTPException(502, 'Telegram request failed. Check token, bot permissions, and webhook/polling conflicts.')
@@ -100,24 +110,13 @@ def create_app(db_override=None, client_override=None):
         async with lock:
             found = db.run('SELECT reply FROM receipts WHERE id=?', (request_id,)).fetchone()
             if found: return found[0]
-            api_key = getsecret('gemini_api_key')
-            if not api_key: raise HTTPException(409, 'Add your Gemini API key in Settings.')
             rows = db.run('SELECT role,text FROM messages ORDER BY created DESC,id DESC LIMIT 60').fetchall()[::-1]
             memories = db.run('SELECT text FROM memories ORDER BY created').fetchall()
-            contents = [{'role': 'model' if role == 'assistant' else 'user', 'parts': [{'text': body}]} for role, body in rows]
-            contents.append({'role':'user', 'parts':[{'text':text}]})
-            model = config()['model']
-            if not re.fullmatch(r'[a-zA-Z0-9._-]+', model): raise HTTPException(422, 'Invalid model name')
+            system = PERSONA + '\nSaved memories (JSON): ' + json.dumps([m[0] for m in memories])
             try:
-                r = await app.state.client.post(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent', headers={'x-goog-api-key':api_key}, json={'systemInstruction':{'parts':[{'text':PERSONA + '\nSaved memories (JSON): ' + json.dumps([m[0] for m in memories])}]},'contents': contents,'generationConfig':{'temperature':0.9,'maxOutputTokens':2048}})
-            except httpx.RequestError: raise HTTPException(502, 'Could not reach Gemini. Retry shortly.') from None
-            if r.status_code != 200:
-                status = r.status_code
-                raise HTTPException(502, {429:'Gemini quota reached. Wait, or choose another available model.',400:'Gemini rejected the request. Check the model and API key.',403:'Gemini access denied. Check your API key and region.',404:'Model unavailable. Choose one from Refresh models.'}.get(status, 'Gemini is temporarily unavailable. Retry shortly.'))
-            data = r.json()
-            parts = (data.get('candidates') or [{}])[0].get('content',{}).get('parts',[])
-            reply = ''.join(p.get('text','') for p in parts if not p.get('thought')).strip()
-            if not reply: raise HTTPException(502, 'Gemini returned no text. Try rephrasing your message.')
+                reply = await asyncio.wait_for(router.generate(system,rows,text), timeout=68)
+            except asyncio.TimeoutError:
+                raise HTTPException(502,'AI providers took too long to respond. No messages were saved; retry shortly.') from None
             now = time.time()
             with db.transaction():
                 for role, body, offset in [('user',text,0),('assistant',reply,0.001)]:
@@ -156,12 +155,12 @@ def create_app(db_override=None, client_override=None):
             with contextlib.suppress(asyncio.CancelledError): await task
             if not client_override: await app.state.client.aclose()
             if not db_override: db.conn.close()
-    app = FastAPI(title='Kana / MONTAi',version='1.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+    app = FastAPI(title='Kana / MONTAi',version='1.1.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     async def auth(authorization: str = Header(default='')):
         if not hmac.compare_digest(authorization.encode(), ('Bearer '+key).encode()): raise HTTPException(401,'Invalid access key')
     @app.api_route('/',methods=['GET','HEAD'])
     @app.api_route('/health',methods=['GET','HEAD'])
-    def health(): return {'ok':True,'service':'kana','version':'1.0.0'}
+    def health(): return {'ok':True,'service':'kana','version':'1.1.0'}
     @app.get('/api/status', dependencies=[Depends(auth)])
     async def status(): return {**config(),'telegram_status':state['telegram'],'persistent_database':db.pg}
     @app.get('/api/messages', dependencies=[Depends(auth)])
@@ -184,17 +183,24 @@ def create_app(db_override=None, client_override=None):
         id = str(uuid.uuid4()); db.run('INSERT INTO memories VALUES(?,?,?)',(id,body.text.strip(),time.time())); return {'id':id}
     @app.delete('/api/memories/{id}', dependencies=[Depends(auth)])
     async def forget(id: str): db.run('DELETE FROM memories WHERE id=?',(id,)); return {'ok':True}
+    @app.post('/api/providers', dependencies=[Depends(auth)])
+    async def add_provider(body: ProviderInput):
+        async with lock:
+            try: return await asyncio.wait_for(router.add(body.api_key,body.provider,body.base_url),timeout=40)
+            except asyncio.TimeoutError: raise HTTPException(502,'Provider discovery timed out; key was not saved.') from None
+    @app.delete('/api/providers/{provider}', dependencies=[Depends(auth)])
+    async def remove_provider(provider: str):
+        async with lock: router.remove(provider)
+        return config()
     @app.get('/api/models', dependencies=[Depends(auth)])
     async def models():
-        if not getsecret('gemini_api_key'): raise HTTPException(409,'Save a Gemini API key first.')
-        names=[]; token=''
-        for _ in range(10):
-            r = await app.state.client.get('https://generativelanguage.googleapis.com/v1beta/models',headers={'x-goog-api-key':getsecret('gemini_api_key')},params={'pageSize':100,**({'pageToken':token} if token else {})})
-            if r.status_code!=200: raise HTTPException(502,'Could not list models. Check your Gemini API key.')
-            data=r.json(); names += [m['name'].removeprefix('models/') for m in data.get('models',[]) if 'generateContent' in m.get('supportedGenerationMethods',[])]
-            token=data.get('nextPageToken','')
-            if not token: break
-        return {'models':names}
+        result=[]
+        for p,key in router.keys().items():
+            try:
+                names=await asyncio.wait_for(router.models(p,key,refresh=True),timeout=15)
+                result += [p+':'+name for name in names]
+            except (HTTPException,httpx.RequestError,asyncio.TimeoutError): pass
+        return {'models':result,'automatic':True}
     @app.put('/api/settings', dependencies=[Depends(auth)])
     async def settings(body: SettingsInput):
         if not re.fullmatch(r'[a-zA-Z0-9._-]+', body.model): raise HTTPException(422,'Invalid model name')
@@ -210,6 +216,9 @@ def create_app(db_override=None, client_override=None):
                 db.put('model',body.model); db.put('telegram_user_id',body.telegram_user_id); db.put('telegram_enabled',str(body.telegram_enabled).lower())
                 for field in ['gemini_api_key','telegram_bot_token']:
                     value = getattr(body,field)
-                    if value is not None: db.put(field,cipher.encrypt(value.strip().encode()).decode() if value.strip() else '')
+                    if value is not None:
+                        storesecret(field,value.strip())
+                        if field=='gemini_api_key': storesecret('ai_key_gemini',value.strip())
+                router.cache.clear()
         return config()
     return app

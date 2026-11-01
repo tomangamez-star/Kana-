@@ -51,7 +51,7 @@ public class MainActivity extends Activity {
     private String decrypt(String value)throws Exception{if(value.isEmpty())return "";String[] p=value.split(":",2);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,secretKey(),new GCMParameterSpec(128,Base64.decode(p[0],Base64.NO_WRAP)));return new String(c.doFinal(Base64.decode(p[1],Base64.NO_WRAP)),StandardCharsets.UTF_8);}
     private void result(String id,Object data,String error){try{JSONObject r=new JSONObject();if(error!=null)r.put("error",error);else r.put("data",data);String script="window.nativeResult("+JSONObject.quote(id)+","+r.toString()+")";runOnUiThread(()->{if(web!=null)web.evaluateJavascript(script,null);});}catch(Exception ignored){}}
     private JSONObject requestServer(String server,String access,String path,String method,String body)throws Exception{
-        if(!path.matches("/api/(status|messages|chat|memories|memories/[a-f0-9-]+|models|settings)(\\?before=[0-9.]+)?"))throw new IOException("Invalid API route");
+        if(!path.matches("/api/(status|messages|chat|memories|memories/[a-f0-9-]+|models|settings|providers|providers/[a-z]+)(\\?before=[0-9.]+)?"))throw new IOException("Invalid API route");
         if(!method.matches("GET|POST|PUT|DELETE"))throw new IOException("Invalid method");
         HttpURLConnection c=(HttpURLConnection)new URL(server+path).openConnection();
         c.setInstanceFollowRedirects(false);c.setConnectTimeout(20000);c.setReadTimeout(85000);c.setRequestMethod(method);c.setRequestProperty("Authorization","Bearer "+access);c.setRequestProperty("Content-Type","application/json");

@@ -1,92 +1,78 @@
-# Kana / MONTAi — Android + Render
+# Kana / MONTAi v1.1 — Automatic AI providers
 
-A private, single-owner Kana Arima AI companion. Ruby glass chat UI, Gemini conversation, explicit saved memories, and an optional Telegram bot share one timeline in Postgres. Unofficial fan project, not affiliated with Oshi no Ko or Google.
+Private Android companion with shared app/Telegram chat and memories. Unofficial Kana Arima fan project.
 
-## Deploy from your phone
+## Upgrade the deployed v1 server
 
-1. Create a GitHub repository, then upload the **contents** of this folder. `render.yaml`, `server/`, `android/`, and `.github/` belong at the repository root. Do not upload the separate PRIVATE setup archive or signing keys.
-2. On Render, create a **Blueprint** from that repository, or use a Python Web Service with:
+1. Extract `Kana-MONTAi-v1.1.0-PATCH-ONLY.zip`.
+2. Upload its files over the matching paths at your existing GitHub repository root. Include **both `server/main.py` and the new `server/ai.py`**. These files work together.
+3. Let Render redeploy. Existing build and start commands stay the same:
    - Build: `pip install -r server/requirements.txt`
    - Start: `uvicorn server.main:create_app --factory --host 0.0.0.0 --port $PORT --workers 1`
    - Health check: `/health`
-3. Set the environment variables below. Use the supplied PRIVATE setup file for your generated keys, or generate your own. Keep the encryption key unchanged across redeploys.
-4. Deploy. Open `https://YOUR-SERVICE.onrender.com/health` and check for `"ok":true`.
-5. Install `Kana-MONTAi-v1.0.0.apk` (Android 8+). Open Settings, paste the Render URL **without `/health`**, and the matching `APP_ACCESS_KEY`. Tap **Connect to Kana**.
-6. Enter your Gemini API key in the app, then **Save configuration**. Refresh available models if the default model is unavailable to your account. Chat!
+4. Keep `DATABASE_URL`, `APP_ACCESS_KEY`, and `SETTINGS_ENCRYPTION_KEY` exactly as they are. Do not recreate the database. Existing chats, memories, and Telegram settings remain.
+5. Install `Kana-MONTAi-v1.1.0-Auto-AI.apk` over v1. It has the same application ID and signer with a higher version code. No uninstall is required for the supplied v1 APK.
+6. Open Settings → **AI API key**, paste your Mistral key, then tap **Detect & save AI key**. Chat normally; model selection and retries are automatic.
 
-### Render environment variables
+No new Render variables are required. The original signing backup remains valid. Source files for the Android update and automated tests are included in the patch.
 
-| Name | Value |
-| --- | --- |
-| `APP_ACCESS_KEY` | Your private random access key, minimum 24 characters. Blueprint generates one automatically: copy the actual value from Render into the app, or replace it with the supplied private setup value. |
-| `SETTINGS_ENCRYPTION_KEY` | Generated Fernet key from PRIVATE setup. Never change it while keeping the existing database, or saved API tokens cannot be decrypted. |
-| `DATABASE_URL` | Supabase **Session pooler** Postgres connection string, including your database password; add `?sslmode=require`. Use Supabase's Connect dialog. Percent-encode special characters in the password. |
-| `GEMINI_API_KEY` | Your Google AI Studio API key; alternatively save it through the app after connecting. |
-| `GEMINI_MODEL` | Default `gemini-2.5-flash`; configurable in the app. Availability and free quota depend on your Gemini account. |
-| `PYTHON_VERSION` | `3.11.11` (set in Blueprint). |
+## AI settings
 
-Use one Render instance and one Uvicorn worker. Postgres tables are created automatically; no SQL to paste. Existing saved settings take precedence over environment defaults. Tokens are encrypted in Postgres; messages and memory notes are normal private database records. Anyone holding the access key can read and manage your companion, so keep it private. This version is for one owner, not a public multi-user service.
+The main field now says **AI API key**. It supports one saved key per provider:
 
-Render free services may sleep when idle. The first connection can take longer; retry after the server wakes. Background Telegram polling is **not an uptime guarantee** on a sleeping service. Use an always-on Render plan if you want Telegram available continuously. The app does not need to stay open for an awake server to answer Telegram.
+| Provider | Automatic key detection | Chat models |
+| --- | --- | --- |
+| Mistral | An unprefixed alphanumeric key is validated only against Mistral | Discovered from the authenticated model list; chat capability required |
+| Gemini | `AIza` prefix | Discovered via model list with `generateContent`; audio/image-only specializations excluded |
+| Groq | `gsk_` prefix | Discovered from active models; speech and guard models excluded |
+| OpenRouter | `sk-or-` prefix | Zero-priced text models only; key is independently validated |
+| Custom OpenAI-compatible | Choose Custom under Advanced and enter an HTTPS API base URL | Requires compatible `/models` and `/chat/completions` endpoints |
 
-## Connect Telegram (optional)
+Keys do not have a universal provider identifier. The app never sends an unknown key to every service to guess. Plain candidate keys are checked only with Mistral; choose a provider override if a recognized provider uses a different key format. Unsupported protocols, such as services needing a distinct account ID or a different request schema, require a dedicated adapter. “Custom” does not mean every AI service works automatically.
 
-1. Create a dedicated bot with BotFather. Do not run the same token on another polling service.
-2. In app Settings, enter its bot token and your **numeric Telegram user ID**, not your phone number or username.
-3. Enable Telegram and save. The backend validates the token and checks for existing webhooks. It does not remove a webhook silently.
-4. Open the bot in Telegram and press Start. Only text DMs from the configured user ID are processed; all other people and groups are ignored.
-5. App and Telegram use the same conversation and saved memory notes. `/start` explains the connection. Disable the switch to stop processing new Telegram messages.
+Each custom endpoint receives your key and chat content. Use only an endpoint you trust. Custom URLs must be public HTTPS hosts on port 443; redirects are disabled. Built-in providers use fixed official hosts.
 
-Telegram personal-account pairing and WhatsApp are **not implemented in v1**. This release connects a Telegram bot, not your personal account. No messages are sent to friends on your behalf.
+Adding a key makes that provider the first choice. Previously saved keys become backups. Remove a provider from its saved-key card to stop using it. Removing Gemini also suppresses a legacy `GEMINI_API_KEY` environment key for this app until you add Gemini again. Optional environment keys `MISTRAL_API_KEY`, `GROQ_API_KEY`, and `OPENROUTER_API_KEY` are also recognized, but the app is the intended setup route.
 
-## Memory and chat behavior
+A successful detection means the API key/model list was accepted, **not** that generation has already been tested. No chat text is sent during detection. The first actual chat verifies generation. Settings displays the provider and model used for the last successful reply.
 
-- Previous 60 messages plus up to 100 saved memory notes are included in each AI request.
-- Full history remains in Postgres, with an Earlier messages button in the app.
-- The Memories tab lets you add and remove explicit facts. Old chats are not automatically summarized into permanent memory in this version.
-- Clearing the conversation clears both app and Telegram history, with confirmation. Memory notes remain until individually removed.
-- An unsuccessful Gemini request does not save a partial user turn. Retrying uses a request ID to avoid creating another completed turn if the first response was lost.
-- Telegram retry state and update offsets persist across redeploys. A narrow crash window after Telegram accepts an outgoing message but before its update is acknowledged can still cause a duplicate Telegram delivery; Bot API has no idempotent send key.
-- Kana is an AI roleplay with a friend dynamic. No model fine-tuning is included. You control the model and API key; the app makes no promise of unlimited free Gemini usage.
+## Automatic model selection and fallback
 
-## Build your own APK
+- Fetch supported chat models from each provider; cache discovery for five minutes.
+- Prefer the last successful model, then suitable default chat aliases when listed.
+- Try alternatives on unavailable models or unsuitable request errors. There are up to three model attempts per provider and six generation attempts overall, with a roughly 68-second routing deadline. Attempts are distributed so later providers have an opportunity to answer.
+- Move to another saved provider on access problems, network failures, or exhausted models. Respect rate-limit cooldowns and `Retry-After`; do not rapidly rotate models to defeat a provider's quota.
+- Content-policy blocks do not trigger attempts to route around the block.
+- Save one completed user/assistant turn only after success. An idempotent request ID avoids duplicate saved turns when the app retries.
+- All providers receive the same Kana persona, recent conversation (last 60 messages), and explicit saved memories. They share the same Postgres history. Tone can still vary by model.
+- A provider's free quota remains subject to its account limits. Keep Mistral, Gemini, Groq and custom-provider accounts in their free modes if you want zero spend. Their model listings do not universally expose prices; this app cannot guarantee free usage for a key tied to paid billing. OpenRouter routing explicitly excludes any model listing a nonzero price.
 
-GitHub Actions: open **Actions → Build Kana APK → Run workflow**. Download the artifact when the job succeeds. This workflow creates a debug APK, whose signer can differ from the supplied APK and across runner builds. For updates that install over the supplied APK, use the PRIVATE signing backup and a signed release build instead.
+## Render/Supabase setup (new installs)
 
-Android Studio: open `android/`, use Java 17 / Android SDK 35 / Gradle 8.9, then build. This repo does not require Node, npm, Capacitor, or a running website. Its UI is bundled inside the APK; a native HTTPS bridge talks to your Render server. Connection credentials are encrypted with Android Keystore and app backups are disabled.
+Required variables: `APP_ACCESS_KEY` (random, at least 24 characters), `SETTINGS_ENCRYPTION_KEY` (a valid Fernet key), and `DATABASE_URL` (persistent Postgres). Generate the first two with `python scripts/generate_keys.py`; never upload their values to GitHub. Gemini is optional now; you can add Mistral in the app without setting a Gemini key.
 
-Command line with Gradle 8.9 installed:
+Use the **complete Session pooler connection string** copied from your own Supabase Connect dialog, with the correct project username and pooler hostname together. URL-encode special characters in the database password, such as `/` → `%2F`, and use `sslmode=require`. Do not guess a pooler hostname or reuse an IPv6-only direct endpoint when the hosting network cannot reach it.
 
-```sh
-cd android
-gradle assembleDebug
-```
+Run one Uvicorn worker and one Render instance. Free Render services may sleep; an always-on service is needed for dependable background Telegram availability. Open your service's `/health`, then paste the root HTTPS service URL and matching `APP_ACCESS_KEY` in the Android app. API keys are encrypted in Postgres; the Android connection credential uses Android Keystore. Messages and memory notes are normal private database records. This is a single-owner app.
 
-For a signed release, set `KANA_KEYSTORE` to the absolute path to your keystore, plus `KANA_STORE_PASSWORD`, `KANA_KEY_ALIAS`, and `KANA_KEY_PASSWORD`, then run `gradle assembleRelease`. Keep signing files outside GitHub. Increase `versionCode` before installing later updates. The supplied preview APK uses the private backup's preview signer; migrate to a protected production signer before distributing publicly.
+## Telegram and memory
 
-## Local backend development
+Telegram remains optional: enter a dedicated BotFather token and your numeric Telegram user ID, enable the switch, then save configuration. Only that user's private messages are handled. Do not run the same bot token in another polling process or with an active webhook. App and Telegram use identical AI routing and shared history.
 
-Python 3.11+:
+Add explicit facts in Memories; up to 100 notes are included in future conversations. Clearing chat preserves these notes. This version does not automatically summarize all old messages into permanent memories. Personal-account Telegram pairing and WhatsApp are not included.
+
+## Development and APK builds
+
+Python 3.11+, Java 17, Android SDK 35, Gradle 8.9. No npm or hosted web frontend is required; the interface is bundled in the Android APK.
 
 ```sh
-pip install -r server/requirements.txt
-python scripts/generate_keys.py
-# Export the generated APP_ACCESS_KEY and SETTINGS_ENCRYPTION_KEY.
-# Set DATABASE_URL to Postgres, or use sqlite:///kana-local.db for local work.
+pip install -r server/requirements.txt pytest
+python -m pytest -q
 uvicorn server.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-The Android app requires an HTTPS endpoint; use an HTTPS development host for a real phone. Do not weaken certificate checks or enable cleartext traffic.
+Set your local environment before starting the server. SQLite is allowed for local development only; Render requires Postgres. The Android app uses HTTPS only.
 
-Tests:
+Open `android/` in Android Studio, or run `gradle assembleDebug` from that folder. The existing GitHub Actions workflow also builds a debug APK. Debug signing differs from the supplied signed APK. To create a compatible release update, use your PRIVATE signing backup and set `KANA_KEYSTORE`, `KANA_STORE_PASSWORD`, `KANA_KEY_ALIAS`, and `KANA_KEY_PASSWORD`, then run `gradle assembleRelease`. Never commit signing keys. v1.1 uses version code 2.
 
-```sh
-pip install pytest
-python -m pytest -q
-```
-
-Routes: public `GET/HEAD /` and `/health`; authenticated `/api/status`, `/api/messages`, `/api/chat`, `/api/settings`, `/api/models`, `/api/memories`. Authorization uses `Bearer APP_ACCESS_KEY`. There is no public web chat or admin page; the Android app is the interface.
-
-## Verification and limitations
-
-Backend automated tests cover authentication, atomic saved turns, retries, quota handling, encryption, memory CRUD, pagination, SQLite restart persistence, and Telegram owner filtering. Gemini and Telegram are mocked in automated tests. The APK has been compiled and its Android signature checked. Physical-device behavior, real Gemini replies, live Telegram delivery, Supabase connectivity and Render deployment require your own configured accounts and are not claimed as live-tested here. The included VALIDATION.md records completed checks.
+See VALIDATION.md for completed checks. Live Gemini/Mistral/Groq/OpenRouter generation and physical-device behavior still require testing with your own keys; no private key was supplied during this patch.
