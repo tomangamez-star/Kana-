@@ -1,0 +1,10 @@
+.env
+*.db
+*.db-*
+__pycache__/
+.pytest_cache/
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
